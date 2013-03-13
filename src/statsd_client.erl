@@ -16,7 +16,9 @@
          gauge/3,
          sets/3,
          flush/1,
-         enable_buffer/1
+         enable_buffer/1,
+         disable_buffer/1,
+         set_flush_after/2
         ]).
 
 %% ------------------------------------------------------------------
@@ -31,8 +33,19 @@
          code_change/3
         ]).
 
--record(state, {host, port, socket, buffer}).
--record(buffer, {enabled=false, payload, payload_size=0, max_payload_size}).
+-record(state, {host,
+                port,
+                socket,
+                buffer
+               }).
+
+-record(buffer, {enabled=false,
+                 payload,
+                 payload_size=0,
+                 max_payload_size=1432,
+                 timer,
+                 flush_after=100
+                }).
 
 %% ------------------------------------------------------------------
 %% API Function Definitions
@@ -72,10 +85,16 @@ sets(Pid, Bucket, Value) ->
     gen_server:cast(Pid, {sets, Bucket, Value}).
 
 flush(Pid) ->
-    gen_server:cast(Pid, flush).
+    erlang:send(Pid, flush).
 
 enable_buffer(Pid) ->
     gen_server:call(Pid, enable_buffer).
+
+disable_buffer(Pid) ->
+    gen_server:call(Pid, disable_buffer).
+
+set_flush_after(Pid, FlushAfter) ->
+    gen_server:call(Pid, {flush_after, FlushAfter}).
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -96,6 +115,17 @@ handle_call(stop, _From, State) ->
 handle_call(enable_buffer, _From, State) ->
     Buffer = State#state.buffer,
     Buffer1 = Buffer#buffer{enabled=true},
+    {reply, ok, State#state{buffer=Buffer1}};
+
+handle_call(disable_buffer, _From, State) ->
+    State1 = flush_buffer(State),
+    Buffer = State1#state.buffer,
+    Buffer1 = Buffer#buffer{enabled=false},
+    {reply, ok, State1#state{buffer=Buffer1}};
+
+handle_call({flush_after, FlushAfter}, _From, State) ->
+    Buffer = State#state.buffer,
+    Buffer1 = Buffer#buffer{flush_after=FlushAfter},
     {reply, ok, State#state{buffer=Buffer1}}.
 
 handle_cast({count, Bucket, Delta, SampleRate}, State) ->
@@ -116,21 +146,11 @@ handle_cast({gauge, Bucket, Value}, State) ->
 handle_cast({sets, Bucket, Value}, State) ->
     Data = data(Bucket, Value, <<"s">>),
     State1 = send_data(Data, State),
-    {noreply, State1};
+    {noreply, State1}.
 
-handle_cast(flush, State) ->
-    Buffer = State#state.buffer,
-    case Buffer#buffer.enabled andalso Buffer#buffer.payload_size > 0 of
-        true ->
-            State1 = send_payload(Buffer#buffer.payload, State),
-            Buffer1 = Buffer#buffer{payload=undefined, payload_size=0},
-            {noreply, State1#state{buffer=Buffer1}};
-        false ->
-            {noreply, State}
-    end.
-
-handle_info(_Info, State) ->
-    {noreply, State}.
+handle_info(flush, State) ->
+    State1 = flush_buffer(State),
+    {noreply, State1}.
 
 terminate(_Reason, State) ->
     gen_udp:close(State#state.socket).
@@ -142,6 +162,54 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
+manage_timer(State) ->
+    Buffer = State#state.buffer,
+    case should_set_timer(Buffer) of
+        true ->
+            set_timer(State);
+        false ->
+            case should_cancel_timer(Buffer) of
+                true ->
+                    cancel_timer(State);
+                false ->
+                    State
+            end
+    end.
+
+should_set_timer(Buffer) ->
+    Buffer#buffer.enabled andalso Buffer#buffer.payload_size > 0 andalso Buffer#buffer.timer == undefined.
+
+should_cancel_timer(Buffer) ->
+    Buffer#buffer.enabled andalso Buffer#buffer.payload_size == 0 andalso is_reference(Buffer#buffer.timer).
+
+set_timer(State) ->
+    Buffer = State#state.buffer,
+    Timer = erlang:send_after(Buffer#buffer.flush_after, self(), flush),
+    Buffer1 = Buffer#buffer{timer=Timer},
+    State#state{buffer=Buffer1}.
+
+cancel_timer(State) ->
+    Buffer = State#state.buffer,
+    case is_reference(Buffer#buffer.timer) of
+        true ->
+            erlang:cancel_timer(Buffer#buffer.timer),
+            Buffer1 = Buffer#buffer{timer=undefined},
+            State#state{buffer=Buffer1};
+        false ->
+            State
+    end.
+
+flush_buffer(State) ->
+    Buffer = State#state.buffer,
+    case Buffer#buffer.enabled andalso Buffer#buffer.payload_size > 0 of
+        true ->
+            State1 = send_payload(Buffer#buffer.payload, State),
+            Buffer1 = Buffer#buffer{payload=undefined, payload_size=0},
+            manage_timer(State1#state{buffer=Buffer1});
+        false ->
+            State
+    end.
+
 state(Options) ->
     BufferOptions = proplists:get_value(buffer, Options, []),
     Buffer = buffer(BufferOptions),
@@ -152,7 +220,8 @@ state(Options) ->
 buffer(BufferOptions) ->
     Enabled = proplists:get_value(enabled, BufferOptions, false),
     MaxPayloadSize = proplists:get_value(max_payload_size, BufferOptions, 1432),
-    #buffer{enabled=Enabled, max_payload_size=MaxPayloadSize}.
+    FlushAfter = proplists:get_value(flush_after, BufferOptions, 100),
+    #buffer{enabled=Enabled, max_payload_size=MaxPayloadSize, flush_after=FlushAfter}.
 
 data(Bucket, Value, Type) when is_integer(Value) ->
     data(Bucket, integer_to_list(Value), Type);
@@ -175,7 +244,7 @@ send_data(Data, State) ->
     Buffer = State#state.buffer,
     case Buffer#buffer.enabled of
         true ->
-            buffer_data(Data, State);
+            manage_timer(buffer_data(Data, State));
         false ->
             send_payload(Data, State)
     end.
@@ -230,7 +299,9 @@ statsd_client_test_() ->
              fun test_timing_with_sample/1,
              fun test_gauge/1,
              fun test_sets/1,
-             fun test_buffer/1
+             fun test_buffer/1,
+             fun test_flush_after/1,
+             fun test_disable_buffer/1
             ],
     WrapTest = fun(T) -> fun(R) -> ?_test(T(R)) end end,
     {foreach,
@@ -258,6 +329,9 @@ dummy_wait(Server, N) ->
 
 dummy_messages(Server) ->
     statsd_dummy_server:messages(Server).
+
+dummy_clear(Server) ->
+    statsd_dummy_server:clear(Server).
 
 %% Tests
 
@@ -305,4 +379,35 @@ test_buffer({Server, Client}) ->
     flush(Client),
     dummy_wait(Server, 1),
     ?assertEqual(["gorets:1|c\nglork:320|ms\ngaugor:333|g\nuniques:765|s"],
+                  dummy_messages(Server)).
+
+test_flush_after({Server, Client}) ->
+    enable_buffer(Client),
+    set_flush_after(Client, 10),
+    count(Client, "gorets", 1),
+    timing(Client, "glork", 320),
+    gauge(Client, "gaugor", 333),
+    sets(Client, "uniques", 765),
+    dummy_wait(Server, 1),
+    ?assertEqual(["gorets:1|c\nglork:320|ms\ngaugor:333|g\nuniques:765|s"],
+                  dummy_messages(Server)).
+
+test_disable_buffer({Server, Client}) ->
+    enable_buffer(Client),
+    count(Client, "gorets", 1),
+    timing(Client, "glork", 320),
+    gauge(Client, "gaugor", 333),
+    sets(Client, "uniques", 765),
+    flush(Client),
+    dummy_wait(Server, 1),
+    ?assertEqual(["gorets:1|c\nglork:320|ms\ngaugor:333|g\nuniques:765|s"],
+                  dummy_messages(Server)),
+    dummy_clear(Server),
+    disable_buffer(Client),
+    count(Client, "gorets", 1),
+    timing(Client, "glork", 320),
+    gauge(Client, "gaugor", 333),
+    sets(Client, "uniques", 765),
+    dummy_wait(Server, 4),
+    ?assertEqual(["gorets:1|c", "glork:320|ms", "gaugor:333|g", "uniques:765|s"],
                   dummy_messages(Server)).

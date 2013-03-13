@@ -65,7 +65,7 @@ handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
 
 handle_call(messages, _From, State) ->
-    {reply, State#state.messages, State};
+    {reply, lists:reverse(State#state.messages), State};
 
 handle_call({wait, N}, From, State) ->
     case length(State#state.messages) >= N of
