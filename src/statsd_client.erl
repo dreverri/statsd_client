@@ -7,6 +7,7 @@
 
 -export([start_link/0,
          start_link/1,
+         stop/1,
          increment/2,
          decrement/2,
          count/3,
@@ -101,6 +102,7 @@ set_flush_after(Pid, FlushAfter) ->
 %% ------------------------------------------------------------------
 
 init(Options) ->
+    %% TODO: udp options
     case gen_udp:open(0) of
         {ok, Socket} ->
             State = state(Options),
@@ -162,6 +164,22 @@ code_change(_OldVsn, State, _Extra) ->
 %% Internal Function Definitions
 %% ------------------------------------------------------------------
 
+state(Options) ->
+    BufferOptions = proplists:get_value(buffer, Options, []),
+    Buffer = buffer(BufferOptions),
+    Host = proplists:get_value(host, Options, "localhost"),
+    Port = proplists:get_value(port, Options, 8125),
+    #state{host=Host, port=Port, buffer=Buffer}.
+
+buffer(BufferOptions) ->
+    Enabled = proplists:get_value(enabled, BufferOptions, false),
+    MaxPayloadSize = proplists:get_value(max_payload_size, BufferOptions, 1432),
+    FlushAfter = proplists:get_value(flush_after, BufferOptions, 100),
+    #buffer{enabled=Enabled, max_payload_size=MaxPayloadSize, flush_after=FlushAfter}.
+
+data(Bucket, Value, Type) ->
+    [Bucket, <<":">>, io_lib:format("~p", [Value]), <<"|">>, Type].
+
 manage_timer(State) ->
     Buffer = State#state.buffer,
     case should_set_timer(Buffer) of
@@ -209,25 +227,6 @@ flush_buffer(State) ->
         false ->
             State
     end.
-
-state(Options) ->
-    BufferOptions = proplists:get_value(buffer, Options, []),
-    Buffer = buffer(BufferOptions),
-    Host = proplists:get_value(host, Options, "localhost"),
-    Port = proplists:get_value(port, Options, 8125),
-    #state{host=Host, port=Port, buffer=Buffer}.
-
-buffer(BufferOptions) ->
-    Enabled = proplists:get_value(enabled, BufferOptions, false),
-    MaxPayloadSize = proplists:get_value(max_payload_size, BufferOptions, 1432),
-    FlushAfter = proplists:get_value(flush_after, BufferOptions, 100),
-    #buffer{enabled=Enabled, max_payload_size=MaxPayloadSize, flush_after=FlushAfter}.
-
-data(Bucket, Value, Type) when is_integer(Value) ->
-    data(Bucket, integer_to_list(Value), Type);
-
-data(Bucket, Value, Type) ->
-    [Bucket, <<":">>, Value, <<"|">>, Type].
 
 send_sample(Data, SampleRate, State) ->
     Random = random:uniform(),
