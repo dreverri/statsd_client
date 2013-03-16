@@ -7,6 +7,7 @@
 
 -export([start_link/0,
          start_link/1,
+         start_link/2,
          stop/1,
          increment/2,
          decrement/2,
@@ -40,12 +41,12 @@
                 buffer
                }).
 
--record(buffer, {enabled=false,
+-record(buffer, {enabled,
                  payload,
                  payload_size=0,
-                 max_payload_size=1432,
+                 max_payload_size,
                  timer,
-                 flush_after=100
+                 flush_after
                 }).
 
 %% ------------------------------------------------------------------
@@ -57,6 +58,9 @@ start_link() ->
 
 start_link(Options) ->
     gen_server:start_link(?MODULE, Options, []).
+
+start_link(Name, Options) ->
+    gen_server:start_link(Name, ?MODULE, Options, []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop).
@@ -113,6 +117,9 @@ init(Options) ->
 
 handle_call(stop, _From, State) ->
     {stop, normal, ok, State};
+
+handle_call(state, _From, State) ->
+    {reply, State, State};
 
 handle_call(enable_buffer, _From, State) ->
     Buffer = State#state.buffer,
@@ -172,7 +179,7 @@ state(Options) ->
     #state{host=Host, port=Port, buffer=Buffer}.
 
 buffer(BufferOptions) ->
-    Enabled = proplists:get_value(enabled, BufferOptions, false),
+    Enabled = proplists:get_value(enabled, BufferOptions, true),
     MaxPayloadSize = proplists:get_value(max_payload_size, BufferOptions, 1432),
     FlushAfter = proplists:get_value(flush_after, BufferOptions, 100),
     #buffer{enabled=Enabled, max_payload_size=MaxPayloadSize, flush_after=FlushAfter}.
@@ -195,10 +202,10 @@ manage_timer(State) ->
     end.
 
 should_set_timer(Buffer) ->
-    Buffer#buffer.enabled andalso Buffer#buffer.payload_size > 0 andalso Buffer#buffer.timer == undefined.
+    Buffer#buffer.payload_size > 0 andalso Buffer#buffer.timer == undefined.
 
 should_cancel_timer(Buffer) ->
-    Buffer#buffer.enabled andalso Buffer#buffer.payload_size == 0 andalso is_reference(Buffer#buffer.timer).
+    Buffer#buffer.payload_size == 0 andalso is_reference(Buffer#buffer.timer).
 
 set_timer(State) ->
     Buffer = State#state.buffer,
@@ -281,7 +288,6 @@ send_payload(Payload, State) ->
         ok ->
             State;
         {error, Reason} ->
-            % TODO: do we need to reopen the socket?
             error_logger:error_report([{reason, Reason},
                                        {payload, Payload},
                                        {state, State}]),
@@ -311,7 +317,7 @@ statsd_client_test_() ->
 test_setup() ->
     try
         {ok, Server} = statsd_dummy_server:start(),
-        {ok, Client} = start_link(),
+        {ok, Client} = start_link([{buffer, [{enabled, false}]}]),
         {Server, Client}
     catch
         Type:Reason ->
