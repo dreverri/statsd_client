@@ -17,10 +17,12 @@
          timing/4,
          gauge/3,
          sets/3,
+         metrics/2,
          flush/1,
          enable_buffer/1,
          disable_buffer/1,
-         set_flush_after/2
+         set_flush_after/2,
+         should_sample/1
         ]).
 
 %% ------------------------------------------------------------------
@@ -94,13 +96,7 @@ sets(Pid, Bucket, Value) ->
     metrics(Pid, [Metric]).
 
 metrics(Pid, Metrics) ->
-    %% filter metrics which specify a sample rate
-    case lists:filter(sample_filter(), Metrics) of
-        [] ->
-            ok;
-        SampledMetrics ->
-            gen_server:cast(Pid, {metrics, SampledMetrics})
-    end.
+    gen_server:cast(Pid, {metrics, Metrics}).
 
 flush(Pid) ->
     erlang:send(Pid, flush).
@@ -113,6 +109,12 @@ disable_buffer(Pid) ->
 
 set_flush_after(Pid, FlushAfter) ->
     gen_server:call(Pid, {flush_after, FlushAfter}).
+
+%% returns true|false indicating if a sample should be taken based on the given
+%% sample rate
+should_sample(SampleRate) ->
+    Random = random:uniform(),
+    Random =< SampleRate.
 
 %% ------------------------------------------------------------------
 %% gen_server Function Definitions
@@ -227,17 +229,6 @@ flush_buffer(State) ->
             manage_timer(State1#state{buffer=Buffer1});
         false ->
             State
-    end.
-
-sample_filter() ->
-    Random = random:uniform(),
-    sample_filter(Random).
-
-sample_filter(Random) ->
-    fun({_, _, _, SampleRate}) ->
-            Random =< SampleRate;
-        (_) ->
-            true
     end.
 
 handle_metric({count, Bucket, Delta, SampleRate}, State) ->
