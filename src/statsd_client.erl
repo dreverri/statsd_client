@@ -75,19 +75,32 @@ count(Pid, Bucket, Delta) ->
     count(Pid, Bucket, Delta, 1.0).
 
 count(Pid, Bucket, Delta, SampleRate) ->
-    gen_server:cast(Pid, {count, Bucket, Delta, SampleRate}).
+    Metric = {count, Bucket, Delta, SampleRate},
+    metrics(Pid, [Metric]).
 
 timing(Pid, Bucket, Time) ->
     timing(Pid, Bucket, Time, 1.0).
 
 timing(Pid, Bucket, Time, SampleRate) ->
-    gen_server:cast(Pid, {time, Bucket, Time, SampleRate}).
+    Metric = {time, Bucket, Time, SampleRate},
+    metrics(Pid, [Metric]).
 
 gauge(Pid, Bucket, Value) ->
-    gen_server:cast(Pid, {gauge, Bucket, Value}).
+    Metric = {gauge, Bucket, Value},
+    metrics(Pid, [Metric]).
 
 sets(Pid, Bucket, Value) ->
-    gen_server:cast(Pid, {sets, Bucket, Value}).
+    Metric = {sets, Bucket, Value},
+    metrics(Pid, [Metric]).
+
+metrics(Pid, Metrics) ->
+    %% filter metrics which specify a sample rate
+    case lists:filter(sample_filter(), Metrics) of
+        [] ->
+            ok;
+        SampledMetrics ->
+            gen_server:cast(Pid, {metrics, SampledMetrics})
+    end.
 
 flush(Pid) ->
     erlang:send(Pid, flush).
@@ -137,24 +150,8 @@ handle_call({flush_after, FlushAfter}, _From, State) ->
     Buffer1 = Buffer#buffer{flush_after=FlushAfter},
     {reply, ok, State#state{buffer=Buffer1}}.
 
-handle_cast({count, Bucket, Delta, SampleRate}, State) ->
-    Data = data(Bucket, Delta, <<"c">>),
-    State1 = send_sample(Data, SampleRate, State),
-    {noreply, State1};
-
-handle_cast({time, Bucket, Time, SampleRate}, State) ->
-    Data = data(Bucket, Time, <<"ms">>),
-    State1 = send_sample(Data, SampleRate, State),
-    {noreply, State1};
-
-handle_cast({gauge, Bucket, Value}, State) ->
-    Data = data(Bucket, Value, <<"g">>),
-    State1 = send_data(Data, State),
-    {noreply, State1};
-
-handle_cast({sets, Bucket, Value}, State) ->
-    Data = data(Bucket, Value, <<"s">>),
-    State1 = send_data(Data, State),
+handle_cast({metrics, Metrics}, State) ->
+    State1 = lists:foldl(fun handle_metric/2, State, Metrics),
     {noreply, State1}.
 
 handle_info(flush, State) ->
@@ -183,9 +180,6 @@ buffer(BufferOptions) ->
     MaxPayloadSize = proplists:get_value(max_payload_size, BufferOptions, 1432),
     FlushAfter = proplists:get_value(flush_after, BufferOptions, 100),
     #buffer{enabled=Enabled, max_payload_size=MaxPayloadSize, flush_after=FlushAfter}.
-
-data(Bucket, Value, Type) ->
-    [Bucket, <<":">>, io_lib:format("~p", [Value]), <<"|">>, Type].
 
 manage_timer(State) ->
     Buffer = State#state.buffer,
@@ -235,17 +229,45 @@ flush_buffer(State) ->
             State
     end.
 
-send_sample(Data, SampleRate, State) ->
+sample_filter() ->
     Random = random:uniform(),
-    if
-        SampleRate == 1.0 ->
-            send_data(Data, State);
-        Random =< SampleRate ->
-            send_data([Data, <<"|@">>, io_lib:format("~p", [SampleRate])], State);
-        true ->
-            State
+    sample_filter(Random).
+
+sample_filter(Random) ->
+    fun({_, _, _, SampleRate}) ->
+            Random =< SampleRate;
+        (_) ->
+            true
     end.
 
+handle_metric({count, Bucket, Delta, SampleRate}, State) ->
+    Data = data(Bucket, Delta, <<"c">>, SampleRate),
+    send_data(Data, State);
+
+handle_metric({time, Bucket, Time, SampleRate}, State) ->
+    Data = data(Bucket, Time, <<"ms">>, SampleRate),
+    send_data(Data, State);
+
+handle_metric({gauge, Bucket, Value}, State) ->
+    Data = data(Bucket, Value, <<"g">>),
+    send_data(Data, State);
+
+handle_metric({sets, Bucket, Value}, State) ->
+    Data = data(Bucket, Value, <<"s">>),
+    send_data(Data, State).
+
+data(Bucket, Value, Type) ->
+    data(Bucket, Value, Type, 1.0).
+
+data(Bucket, Value, Type, SampleRate) ->
+    Data = [Bucket, <<":">>, io_lib:format("~p", [Value]), <<"|">>, Type],
+    case is_float(SampleRate) andalso SampleRate < 1.0 of
+        true ->
+            [Data, <<"|@">>, io_lib:format("~p", [SampleRate])];
+        false ->
+            Data
+    end.
+        
 send_data(Data, State) ->
     Buffer = State#state.buffer,
     case Buffer#buffer.enabled of
@@ -321,7 +343,9 @@ test_setup() ->
         {Server, Client}
     catch
         Type:Reason ->
-            error_logger:error_report({Type, Reason, erlang:get_stacktrace()}),
+            error_logger:error_report([{type, Type},
+                                       {reason, Reason},
+                                       {stacktrace, erlang:get_stacktrace()}]),
             throw({Type, Reason})
     end.
 
