@@ -116,7 +116,8 @@ sets(Pid, Bucket, Value) ->
     metrics(Pid, [Metric]).
 
 metrics(Pid, Metrics) ->
-    gen_server:cast(Pid, {metrics, Metrics}).
+    Data = [metric_to_data(Metric) || Metric <- Metrics],
+    gen_server:cast(Pid, {send_data, Data}).
 
 flush(Pid) ->
     erlang:send(Pid, flush).
@@ -173,8 +174,8 @@ handle_call({flush_after, FlushAfter}, _From, State) ->
     Buffer1 = Buffer#buffer{flush_after=FlushAfter},
     {reply, ok, State#state{buffer=Buffer1}}.
 
-handle_cast({metrics, Metrics}, State) ->
-    State1 = lists:foldl(fun handle_metric/2, State, Metrics),
+handle_cast({send_data, Data}, State) ->
+    State1 = lists:foldl(fun send_data/2, State, Data),
     {noreply, State1}.
 
 handle_info(flush, State) ->
@@ -252,21 +253,17 @@ flush_buffer(State) ->
             State
     end.
 
-handle_metric({count, Bucket, Delta, SampleRate}, State) ->
-    Data = data(Bucket, Delta, <<"c">>, SampleRate),
-    send_data(Data, State);
+metric_to_data({count, Bucket, Delta, SampleRate}) ->
+    data(Bucket, Delta, <<"c">>, SampleRate);
 
-handle_metric({time, Bucket, Time, SampleRate}, State) ->
-    Data = data(Bucket, Time, <<"ms">>, SampleRate),
-    send_data(Data, State);
+metric_to_data({time, Bucket, Time, SampleRate}) ->
+    data(Bucket, Time, <<"ms">>, SampleRate);
 
-handle_metric({gauge, Bucket, Value}, State) ->
-    Data = data(Bucket, Value, <<"g">>),
-    send_data(Data, State);
+metric_to_data({gauge, Bucket, Value}) ->
+    data(Bucket, Value, <<"g">>);
 
-handle_metric({sets, Bucket, Value}, State) ->
-    Data = data(Bucket, Value, <<"s">>),
-    send_data(Data, State).
+metric_to_data({sets, Bucket, Value}) ->
+    data(Bucket, Value, <<"s">>).
 
 data(Bucket, Value, Type) ->
     data(Bucket, Value, Type, 1.0).
